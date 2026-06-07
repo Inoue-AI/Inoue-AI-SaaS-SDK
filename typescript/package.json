@@ -1,0 +1,22 @@
+{
+  "name": "@inoue-ai/sdk",
+  "version": "0.1.0",
+  "description": "Official public TypeScript/JavaScript SDK for the Inoue AI SaaS API.",
+  "author": "Inoue AI <engineering@inoue.ai>",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Inoue-AI/Inoue-AI-SaaS-SDK.git"
+  },
+  "license": "MIT",
+  "main": "./dist/index.js",
+  "typings": "./dist/index.d.ts",
+  "module": "./dist/esm/index.js",
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc && tsc -p tsconfig.esm.json",
+    "prepare": "npm run build"
+  },
+  "devDependencies": {
+    "typescript": "^4.0 || ^5.0"
+  }
+}

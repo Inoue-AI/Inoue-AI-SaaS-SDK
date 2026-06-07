@@ -1,0 +1,16 @@
+# Root .gitignore for the Inoue AI public SDK monorepo.
+# Per-language build artifacts are additionally ignored by the generator-emitted
+# .gitignore files under python/ and typescript/.
+
+# Local regen scratch (scripts/regen.sh + manual verification temp dirs)
+.regen-tmp-*/
+
+# Go SDK build/test scratch
+go/**/*.test
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/

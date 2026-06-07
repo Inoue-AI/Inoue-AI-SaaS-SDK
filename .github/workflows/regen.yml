@@ -1,0 +1,117 @@
+# regen.yml — drift gate for the generated SDK.
+#
+# The committed spec under spec/ is the ONE inbound artifact from the backend.
+# Everything else (go/, python/, typescript/) is generated FROM that spec by
+# scripts/regen.sh. This workflow re-runs the generators and fails if the
+# committed code has drifted from the spec, mirroring the backend's
+# `make sdk-check` gate.
+#
+# Drift policy (matches the backend):
+#   - Go     : byte-stable -> HARD byte-diff gate on go/inoueai/client.gen.go.
+#   - Py/TS  : carry generator timestamps -> NOT byte-diff gated. We assert the
+#              generators run clean against the committed spec and that the Go
+#              SDK still builds; spec freshness is enforced by the inbound PR
+#              that updates spec/ from the backend.
+#
+# Triggers: pushes/PRs touching the spec, the generators, or the generated Go
+# client; plus manual dispatch and a repository_dispatch hook the backend can
+# fire after `make openapi` changes the public spec.
+name: regen
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "spec/**"
+      - "scripts/**"
+      - "go/inoueai/client.gen.go"
+      - ".github/workflows/regen.yml"
+  pull_request:
+    paths:
+      - "spec/**"
+      - "scripts/**"
+      - "go/inoueai/client.gen.go"
+      - ".github/workflows/regen.yml"
+  workflow_dispatch: {}
+  repository_dispatch:
+    types: [spec-updated]
+
+permissions:
+  contents: read
+
+jobs:
+  go-drift:
+    name: Go client byte-drift gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23.0"
+          cache: false
+
+      - name: Regenerate Go client from spec/openapi.public-3.0.json
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp)"
+          sandbox="$(mktemp -d)"
+          cat > "$sandbox/go.mod" <<'EOF'
+          module inoue-sdk-gen-sandbox
+
+          go 1.23.0
+          EOF
+          (
+            cd "$sandbox"
+            GOWORK=off GOFLAGS=-mod=mod go run \
+              github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.4.1 \
+              -config "$GITHUB_WORKSPACE/scripts/oapi-codegen.yaml" \
+              -o "$tmp" \
+              "$GITHUB_WORKSPACE/spec/openapi.public-3.0.json"
+          )
+          if ! diff -q "$tmp" "$GITHUB_WORKSPACE/go/inoueai/client.gen.go" >/dev/null; then
+            echo "::error::go/inoueai/client.gen.go is stale — run scripts/regen.sh and commit"
+            diff "$tmp" "$GITHUB_WORKSPACE/go/inoueai/client.gen.go" || true
+            exit 1
+          fi
+          echo "Go client is in sync with the committed spec."
+
+      - name: Build the standalone Go module
+        working-directory: go
+        run: |
+          GOWORK=off go build ./...
+          GOWORK=off go vet ./...
+
+  py-ts-generate:
+    name: Python + TypeScript generate clean
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Regenerate Python from spec/openapi.public.json
+        run: |
+          set -euo pipefail
+          version="$(tr -d '[:space:]' < VERSION)"
+          docker run --rm -v "$PWD:/work" -w /work \
+            openapitools/openapi-generator-cli:v7.11.0 generate \
+            -g python \
+            -i spec/openapi.public.json \
+            -c scripts/openapi-generator-python.yaml \
+            --additional-properties "packageVersion=$version" \
+            -o /tmp/py-out
+          test -f /tmp/py-out/setup.py
+          echo "Python generated clean."
+
+      - name: Regenerate TypeScript from spec/openapi.public.json
+        run: |
+          set -euo pipefail
+          version="$(tr -d '[:space:]' < VERSION)"
+          docker run --rm -v "$PWD:/work" -w /work \
+            openapitools/openapi-generator-cli:v7.11.0 generate \
+            -g typescript-fetch \
+            -i spec/openapi.public.json \
+            -c scripts/openapi-generator-typescript.yaml \
+            --additional-properties "npmVersion=$version" \
+            -o /tmp/ts-out
+          test -f /tmp/ts-out/package.json
+          echo "TypeScript generated clean."

@@ -1,0 +1,76 @@
+# publish-typescript.yml — build + publish the TypeScript SDK to npm.
+#
+# npm package : @inoue-ai/sdk  (scoped, public)
+#
+# Trigger: a GitHub release tagged `ts/v*` (the per-language tag convention) OR
+# a top-level `v*` release (publishes all languages).
+#
+# Publishing is GATED on the NPM_TOKEN repo secret the OWNER supplies — the
+# publish step is skipped entirely when the secret is absent, so the build half
+# still runs (and proves the package compiles) on every release.
+#
+# Provenance: `--provenance` is requested via `id-token: write` so npm records a
+# signed build-provenance attestation when the publish runs in this workflow.
+#
+# No token is embedded. The publish step references only
+# ${{ secrets.NPM_TOKEN }} via NODE_AUTH_TOKEN.
+name: publish-typescript
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-publish:
+    if: >-
+      startsWith(github.event.release.tag_name, 'ts/v') ||
+      (startsWith(github.event.release.tag_name, 'v') &&
+       !startsWith(github.event.release.tag_name, 'go/'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # npm provenance
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install + build
+        working-directory: typescript
+        run: |
+          npm install
+          npm run build
+
+      - name: Verify build output
+        working-directory: typescript
+        run: |
+          test -f dist/index.js
+          test -f dist/index.d.ts
+          test -f dist/esm/index.js
+          echo "TypeScript build output present."
+
+      - name: Guard — require NPM_TOKEN
+        id: guard
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "${NPM_TOKEN:-}" ]; then
+            echo "::warning::NPM_TOKEN secret is not set — skipping npm publish. Add the NPM_TOKEN repo secret and re-run the release to publish."
+            echo "have_token=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_token=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish to npm (public, with provenance)
+        if: steps.guard.outputs.have_token == 'true'
+        working-directory: typescript
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          npm publish --access public --provenance

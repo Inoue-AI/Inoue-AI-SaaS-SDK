@@ -1,0 +1,111 @@
+# publish-python.yml — build + publish the Python SDK to PyPI.
+#
+# Distribution name : inoue-ai-sdk
+# Import package    : inoue_ai_sdk
+#
+# Trigger: a GitHub release tagged `py/v*` (the per-language tag convention) OR
+# a top-level `v*` release (publishes all languages).
+#
+# Publishing is GATED on credentials the OWNER supplies. Two paths are wired,
+# in order of preference:
+#   1. PyPI Trusted Publishing (OIDC) — token-less. PREFERRED. Requires the
+#      owner to register this repo + the `pypi` environment as a trusted
+#      publisher on PyPI (no secret stored anywhere). Active automatically once
+#      registered; nothing else to configure here.
+#   2. PYPI_API_TOKEN repo secret — fallback. Used only when the OIDC publish is
+#      not configured AND the secret is present.
+#
+# No token is embedded. The token step only references ${{ secrets.PYPI_API_TOKEN }}
+# and is skipped entirely when the secret is absent.
+name: publish-python
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build sdist + wheel
+    if: >-
+      startsWith(github.event.release.tag_name, 'py/v') ||
+      (startsWith(github.event.release.tag_name, 'v') &&
+       !startsWith(github.event.release.tag_name, 'go/'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build distributions
+        working-directory: python
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+          ls -l dist
+
+      - name: Smoke-import the built wheel
+        working-directory: python
+        run: |
+          python -m pip install dist/*.whl
+          python -c "import inoue_ai_sdk; print('inoue_ai_sdk import OK')"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-dist
+          path: python/dist/*
+
+  publish-trusted:
+    name: Publish to PyPI (Trusted Publishing / OIDC)
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/inoue-ai-sdk/
+    permissions:
+      id-token: write   # required for OIDC trusted publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-dist
+          path: dist
+
+      - name: Publish (OIDC; no token)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # If trusted publishing is not configured this step fails; the
+          # token fallback below then takes over.
+          skip-existing: true
+        continue-on-error: true
+
+  publish-token:
+    name: Publish to PyPI (API token fallback)
+    needs: publish-trusted
+    # Only when the owner has added PYPI_API_TOKEN. If the OIDC job already
+    # uploaded, twine's skip-existing keeps this idempotent.
+    if: ${{ needs.publish-trusted.result != 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-dist
+          path: dist
+
+      - name: Guard — require PYPI_API_TOKEN
+        env:
+          PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          if [ -z "${PYPI_API_TOKEN:-}" ]; then
+            echo "::error::Neither Trusted Publishing nor PYPI_API_TOKEN is configured. Add the PYPI_API_TOKEN repo secret or register PyPI Trusted Publishing, then re-run."
+            exit 1
+          fi
+
+      - name: Publish (API token)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          skip-existing: true

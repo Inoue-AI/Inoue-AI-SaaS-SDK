@@ -1,0 +1,62 @@
+# publish-go.yml — "publish" the Go SDK.
+#
+# Go modules are not published to a registry — the Go module proxy serves them
+# directly from a git tag. For a submodule that lives under the `go/`
+# subdirectory, the tag MUST be prefixed with that path: `go/vX.Y.Z`. The proxy
+# then resolves `github.com/Inoue-AI/Inoue-AI-SaaS-SDK/go@vX.Y.Z` from that tag.
+#
+# This workflow runs on a GitHub release whose tag is `go/v*`. It:
+#   1. builds + vets the standalone module to prove the tagged commit compiles;
+#   2. warms proxy.golang.org so the version is immediately resolvable.
+#
+# No registry secret is required — only the built-in GITHUB_TOKEN (used by the
+# checkout). Publishing is therefore unblocked the moment the owner cuts a
+# `go/vX.Y.Z` release; there is nothing for the owner to add.
+name: publish-go
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  publish-go:
+    # Only react to Go-tagged releases (go/v1.2.3); ignore v1.2.3 / py / ts tags.
+    if: startsWith(github.event.release.tag_name, 'go/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23.0"
+          cache: false
+
+      - name: Build + vet the tagged module
+        working-directory: go
+        run: |
+          GOWORK=off go build ./...
+          GOWORK=off go vet ./...
+
+      - name: Warm the Go module proxy
+        env:
+          GOPROXY: proxy.golang.org
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#go/}"   # go/v1.2.3 -> v1.2.3
+          module="github.com/Inoue-AI/Inoue-AI-SaaS-SDK/go"
+          echo "Warming proxy for ${module}@${version}"
+          # Retry: the proxy may take a moment to observe a brand-new tag.
+          for attempt in 1 2 3 4 5; do
+            if GOFLAGS=-mod=mod GOWORK=off go list -m "${module}@${version}"; then
+              echo "Proxy resolved ${module}@${version}."
+              exit 0
+            fi
+            echo "Attempt ${attempt} failed; retrying in 15s..."
+            sleep 15
+          done
+          echo "::warning::Proxy did not resolve ${module}@${version} yet; it will become available shortly."
